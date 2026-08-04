@@ -1,0 +1,46 @@
+# cc-sysstat.conf — sourced by collector.sh and collector-loop.sh.
+# Install to ~/.config/cc-sysstat.conf (per-user) or /etc/cc-sysstat.conf.
+#
+# Note the "${VAR:-default}" form on every setting. It is what makes the
+# environment win over this file, so you can try a setting without editing it:
+#
+#   CC_SYSSTAT_DISKS="/ /home" ./collector/collector.sh --print-devs
+#
+# CC_SYSSTAT_DISKS uses "${VAR-default}" (no colon) because "" is a meaningful
+# value here -- it means "no disk metrics" -- and ":-" would replace it with the
+# default. A plain `CC_SYSSTAT_DISKS="..."` would silently override the environment
+# instead, because this file is sourced after those variables are already set.
+
+# Disks to report, as a space-separated list of MOUNTPOINTS.
+#
+# Each mountpoint is resolved to the whole physical disk backing it — walking up
+# through partitions and LVM/dm layers — because /proc/diskstats io_ticks is only
+# meaningful per physical device. So "/" on an LVM volume on /dev/sde3 correctly
+# reports /dev/sde, and two mountpoints on the same disk report the same number.
+#
+# Add ":label" to control how it is displayed. The label is used verbatim in the
+# status line, so keep it short — this block is the widest thing on the line.
+#
+#   CC_SYSSTAT_DISKS="/ /data /staging"                 # labels default to the mountpoint
+#   CC_SYSSTAT_DISKS="/:/ /data:/d /data2:/d2"          # short labels
+#   CC_SYSSTAT_DISKS=""                                 # no disk metrics at all
+#
+# Mountpoints that cannot be resolved to a physical disk (NFS, tmpfs, ZFS,
+# overlayfs) are skipped silently rather than reported as zero.
+#
+# Resolution happens once when the service starts. After changing this line,
+# restart the service — a reload is not enough.
+CC_SYSSTAT_DISKS="${CC_SYSSTAT_DISKS-/}"
+
+# Seconds between samples. Freshness knob.
+#CC_SYSSTAT_INTERVAL="${CC_SYSSTAT_INTERVAL:-3}"
+
+# Sliding-average window, milliseconds. Smoothness knob, independent of the tick:
+# each metric is the delta between the oldest sample still inside this window and
+# the newest. Real timestamps mean a late or missed tick widens the span instead
+# of corrupting the rate.
+#CC_SYSSTAT_WINDOW_MS="${CC_SYSSTAT_WINDOW_MS:-15000}"
+
+# Output/state paths. Must be on tmpfs — this is written every tick, forever.
+#CC_SYSSTAT_OUT="${CC_SYSSTAT_OUT:-/dev/shm/cc-sysstat.json}"
+#CC_SYSSTAT_STATE="${CC_SYSSTAT_STATE:-/dev/shm/cc-sysstat.state}"

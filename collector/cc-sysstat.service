@@ -1,0 +1,26 @@
+[Unit]
+Description=Collect system stats to tmpfs for Claude Code status lines
+
+[Service]
+# Long-lived loop, deliberately not a timer+oneshot: a timer would log
+# "Starting/Finished" every few seconds and drown the journal.
+Type=simple
+# Runs the INSTALLED copy (cp via install.sh), not a repo checkout — so editing
+# the repo does not affect the live service until you install again.
+ExecStart=__PREFIX__/collector-loop.sh
+Restart=on-failure
+RestartSec=5
+# Runs as a normal user: no root needed. /proc is world-readable and /dev/shm is
+# world-writable, and a user-owned JSON matches what manual iteration produces.
+User=__USER__
+# Be a good citizen: lowest scheduling priority, idle I/O class. This thing must
+# never be the reason something else is slow.
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+# NOTE: do NOT add ProtectSystem=strict or PrivateTmp — both make /dev/shm
+# read-only or private for the service, which silently breaks the JSON write.
+# You get a running service and a status line that never shows metrics.
+
+[Install]
+WantedBy=multi-user.target
