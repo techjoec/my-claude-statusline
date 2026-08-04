@@ -32,9 +32,13 @@ now_ms=$(( EPOCHSECONDS * 1000 ))
 # Output: line 1 = cwd/model/effort, line 2 = ok/cpu/mem/claudes,
 # lines 3+ = one "label<TAB>value" per disk, in collector emit order.
 JQ_PROG='
-  [ (.cwd // .workspace.current_dir // ""),
-    ((.model.display_name // "") | sub(" *\\([0-9]+[KMk]( context)?\\)$"; "")),
-    (.effort.level // "") ] | @tsv,
+  ( [ (.cwd // .workspace.current_dir // ""),
+      ((.model.display_name // "") | sub(" *\\([0-9]+[KMk]( context)?\\)$"; "")),
+      (.effort.level // ""),
+      (.transcript_path // "") ]
+    # A tab-IFS read collapses runs of tabs, so an empty field would shift
+    # every later one left. Hold empties open with a sentinel instead.
+    | map(if . == "" then "-" else . end) | @tsv ),
   ( ($sys[0] // {}) as $s
     | if ($s.ready == true) and (($now - ($s.ts // 0)) < $stale)
       then ([1, $s.cpu, $s.mem, ($s.claude // 0)] | @tsv),
@@ -56,7 +60,8 @@ if [ "${#L[@]}" -eq 0 ] && [ "$SYS_JSON" != /dev/null ]; then
   mapfile -t L < <(parse /dev/null)
 fi
 
-IFS=$'\t' read -r cwd model effort <<<"${L[0]:-}"
+IFS=$'\t' read -r cwd model effort transcript <<<"${L[0]:-}"
+for v in cwd model effort transcript; do [ "${!v}" = "-" ] && printf -v "$v" ''; done
 [ -z "$cwd" ] && cwd=$PWD
 
 # Colors: cwd tan, effort magenta-pink, labels violet, separators/idle grey.
@@ -105,6 +110,49 @@ sep=" ${C_SEP}│${RST} "      # between groups; disks inside the bracket are sp
 # model in its family color; effort (when present) in its own color inside parens
 seg="$(model_color "$model")${model}${RST}"
 [ -n "$effort" ] && seg="${seg} ${C_EFFORT}(${effort})${RST}"
+
+# --- Prompt-cache freshness ---
+# The prompt cache is per-session state, so unlike the load metrics it cannot
+# come from the shared collector: each session reads its own transcript. Every
+# API call refreshes the cache, and the response's usage block records which
+# TTL bucket it wrote (5m or 1h), so the last main-loop assistant entry yields
+# both the moment of the last touch and the TTL to count down from. Only the
+# transcript's tail is read; the window just has to be deep enough that one
+# assistant entry survives even when a large tool result sits at the end. If
+# none does, the segment is omitted rather than guessed.
+# Needs `statusLine.refreshInterval` in settings.json — without idle repaints
+# a countdown freezes at its last event-driven value.
+if [ "${CC_STATUSLINE_CACHE:-1}" != "0" ] && [ -n "$transcript" ] && [ -r "$transcript" ]; then
+  IFS=$'\t' read -r cache_ts cache_ttl < <(
+    tail -c "${CC_STATUSLINE_CACHE_TAIL_BYTES:-262144}" -- "$transcript" 2>/dev/null | jq -nrR '
+      [ inputs | fromjson?
+        | select(.type == "assistant" and .isSidechain != true)
+        | (.message.usage // empty) as $u
+        | { ts: (.timestamp | sub("\\.[0-9]+"; "") | fromdate? // 0),
+            h1: (($u.cache_creation.ephemeral_1h_input_tokens // 0) > 0) } ]
+      | select(length > 0)
+      # The TTL is a per-session property, but a call that creates nothing new
+      # reports 0 in both buckets -- so scan the whole window, not just `last`.
+      | [ last.ts, (if map(.h1) | any then 3600 else 300 end) ] | @tsv' 2>/dev/null)
+  if [ "${cache_ts:-0}" -gt 0 ] 2>/dev/null; then
+    rem=$(( cache_ts + cache_ttl - EPOCHSECONDS ))
+    if [ "$rem" -le 0 ]; then
+      # Cold is a resting state, not an alarm -- the next call simply rebuilds
+      # the cache -- so it recedes into the idle grey, same as a 0% metric.
+      ctxt="cold"; cache_c=$C_ZERO
+    else
+      if [ "$rem" -ge 60 ]; then ctxt="$(( rem / 60 ))m"; else ctxt="${rem}s"; fi
+      # Green while comfortably inside the TTL, orange for the last fifth --
+      # the window where "reply now or pay a full cache re-write" is live.
+      if [ "$rem" -le $(( cache_ttl / 5 )) ]
+        then cache_c=$'\e[01;38;5;208m'; else cache_c=$'\e[01;38;5;78m'; fi
+    fi
+    # Same width rule as pair(): pad to the typical value ("47m"), slack in
+    # front of the label. Only "cold" is wider, and that shift happens once.
+    cp=$(( 3 - ${#ctxt} )); [ "$cp" -lt 0 ] && cp=0
+    seg="${seg}${sep}$(printf '%*s' "$cp" "")${C_LABEL}Cache:${RST} ${cache_c}${ctxt}${RST}"
+  fi
+fi
 
 # --- System metrics (already parsed above, in the same jq pass) ---
 metrics=""

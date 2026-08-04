@@ -5,7 +5,7 @@ working directory, model, and live system load — plus the small systemd
 collector that feeds it.
 
 ```
-~/repos/my-project │ Opus 5 (high) │ Claudes: 3 │ CPU:  6% │ RAM: 27% │ Disk: [ /: 0% /d: 4% /stg: 96% ]
+~/repos/my-project │ Opus 5 (high) │ Cache: 47m │ Claudes: 3 │ CPU:  6% │ RAM: 27% │ Disk: [ /: 0% /d: 4% /stg: 96% ]
 ```
 
 ## Why a collector
@@ -67,7 +67,8 @@ in:
 
 Any path works — a checkout, `~/.claude/`, wherever you keep scripts.
 `refreshInterval` controls idle repaints only; the line always repaints on
-activity.
+activity. The `Cache` countdown depends on it — without idle repaints the
+count freezes at its last event-driven value.
 
 `./uninstall.sh` reverses the install. It leaves your config and the
 `statusLine` block alone.
@@ -126,6 +127,15 @@ containers share the host `/proc`.
 
 - **Model** is colored by family: Opus azure, Sonnet aqua, Haiku yellow, Fable
   purple.
+- **Cache** counts down this session's prompt-cache TTL — the time left before
+  the Anthropic prompt cache holding your conversation expires. Every API call
+  refreshes it; the TTL in play (5m or 1h) is read from the session transcript,
+  not assumed. Green while warm, orange in the last fifth — the window where
+  "reply now or the next turn pays a full cache re-write" is live — and grey
+  `cold` once expired. Cold is a resting state, not an error: the next message
+  simply rebuilds the cache at cache-write cost and latency. The segment is
+  omitted when there is nothing defensible to show (no transcript yet, or no
+  API turn found in the tail that is read).
 - **Load values** are grey at 0, green below 50%, orange 50–75%, red 76%+. Only
   the number is colored; labels stay violet.
 - **Percentages display-cap at 99%** — a pegged metric reads `99%` in red rather
