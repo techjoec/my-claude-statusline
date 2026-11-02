@@ -42,7 +42,8 @@ resolve_disks() {
   for entry in $DISKS; do
     mp="${entry%%:*}"
     label="${entry#*:}"; [ "$label" = "$entry" ] && label="$mp"
-    src=$(findmnt -no SOURCE "$mp" 2>/dev/null) || continue
+    # -v drops a btrfs subvolume suffix ("/dev/sda2[/@]"), which lsblk cannot resolve.
+    src=$(findmnt -nv -o SOURCE "$mp" 2>/dev/null) || continue
     [ -z "$src" ] && continue
     dev=$(lsblk --inverse --list -no NAME,TYPE "$src" 2>/dev/null |
           awk '$2=="disk"{n=$1} END{print n}')

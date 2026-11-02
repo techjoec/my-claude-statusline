@@ -5,7 +5,7 @@ working directory, model, and live system load — plus the small systemd
 collector that feeds it.
 
 ```
-~/repos/my-project │ Opus 5 (high) │ Cache: 47m │ Claudes: 3 │ CPU:  6% │ RAM: 27% │ Disk: [ /: 0% /d: 4% /stg: 96% ]
+[ my-host ] │ ~/repos/my-project │ Opus 5 (high) │ Cache:  47m │ Claudes:  3x │ CPU:  6% │ RAM: 27% │ Disk: [ /:  0% /d:  4% /stg: 96% ]
 ```
 
 ## Why a collector
@@ -125,24 +125,27 @@ containers share the host `/proc`.
 
 ## Reading the line
 
+- **Host** leads the line, `[ host ]` in bright white inside the same slate
+  brackets as the disk block, so a session on another machine is obvious.
+  `CC_STATUSLINE_HOST=0` hides it.
 - **Model** is colored by family: Opus azure, Sonnet aqua, Haiku yellow, Fable
   purple.
 - **Cache** counts down this session's prompt-cache TTL — the time left before
   the Anthropic prompt cache holding your conversation expires. Every API call
-  refreshes it; the TTL in play (5m or 1h) is read from the session transcript,
-  not assumed. Green while warm, orange in the last fifth — the window where
+  refreshes it; the expiry and the TTL in play (5m or 1h) come from Claude
+  Code's own `prompt_cache` data (v2.1.251+), not assumed. Green while warm, orange in the last fifth — the window where
   "reply now or the next turn pays a full cache re-write" is live — and grey
   `cold` once expired. Cold is a resting state, not an error: the next message
   simply rebuilds the cache at cache-write cost and latency. The segment is
-  omitted when there is nothing defensible to show (no transcript yet, or no
-  API turn found in the tail that is read).
+  omitted until the session's first API response.
 - **Load values** are grey at 0, green below 50%, orange 50–75%, red 76%+. Only
   the number is colored; labels stay violet.
 - **Percentages display-cap at 99%** — a pegged metric reads `99%` in red rather
   than `100%`. The color is the alarm, and it keeps the line from shifting width
   at the worst possible moment.
-- **The line is width-stable.** Fields are padded to their typical width, so
-  numbers changing under normal load do not make the whole line jump around.
+- **The line is width-stable.** Every field is as wide as its widest value
+  (`Cache` 4, `Claudes` 2, each percentage 3), padded between the colon and the
+  number, so no reading ever moves the rest of the line.
 
 ## Notes
 

@@ -6,7 +6,7 @@
 # every session just reads /dev/shm/cc-sysstat.json. That is the whole point:
 # with N sessions open you get one sampler, not N.
 #
-# Layout: cwd │ model (effort) │ Claudes: N │ CPU │ RAM │ Disk: [ per-disk %util ]
+# Layout: [ host ] │ cwd │ model (effort) │ Cache │ Claudes: N │ CPU │ RAM │ Disk: [ per-disk %util ]
 #
 # The disk block is driven entirely by the collector's config — whatever keys
 # it emits get rendered, in order. No disks configured, no disk block.
@@ -29,13 +29,14 @@ now_ms=$(( EPOCHSECONDS * 1000 ))
 # /dev/null, which slurps to [] and reads as "no metrics".
 [ -r "$SYS_JSON" ] || SYS_JSON=/dev/null
 
-# Output: line 1 = cwd/model/effort, line 2 = ok/cpu/mem/claudes,
+# Output: line 1 = cwd/model/effort/cache, line 2 = ok/cpu/mem/claudes,
 # lines 3+ = one "label<TAB>value" per disk, in collector emit order.
 JQ_PROG='
   ( [ (.cwd // .workspace.current_dir // ""),
       ((.model.display_name // "") | sub(" *\\([0-9]+[KMk]( context)?\\)$"; "")),
       (.effort.level // ""),
-      (.transcript_path // "") ]
+      (if .prompt_cache == null then "" else (.prompt_cache.expires_at // 0) end | tostring),
+      (.prompt_cache.ttl // "") ]
     # A tab-IFS read collapses runs of tabs, so an empty field would shift
     # every later one left. Hold empties open with a sentinel instead.
     | map(if . == "" then "-" else . end) | @tsv ),
@@ -60,8 +61,8 @@ if [ "${#L[@]}" -eq 0 ] && [ "$SYS_JSON" != /dev/null ]; then
   mapfile -t L < <(parse /dev/null)
 fi
 
-IFS=$'\t' read -r cwd model effort transcript <<<"${L[0]:-}"
-for v in cwd model effort transcript; do [ "${!v}" = "-" ] && printf -v "$v" ''; done
+IFS=$'\t' read -r cwd model effort cache_exp cache_ttl <<<"${L[0]:-}"
+for v in cwd model effort cache_exp cache_ttl; do [ "${!v}" = "-" ] && printf -v "$v" ''; done
 [ -z "$cwd" ] && cwd=$PWD
 
 # Colors: cwd tan, effort magenta-pink, labels violet, separators/idle grey.
@@ -73,8 +74,10 @@ C_EFFORT=$'\e[01;38;5;213m'
 C_LABEL=$'\e[01;38;5;141m'   # light violet labels; distinct from threshold colors
 C_SEP=$'\e[00;38;5;244m'     # dim grey group separators
 C_ZERO=$'\e[00;38;5;244m'    # idle (0%) values recede instead of glowing green
-C_BRK=$'\e[00;38;5;60m'      # disk brackets: dark slate, structure only
+C_BRK=$'\e[00;38;5;103m'     # host + disk brackets: light slate, structure only
 C_DISK=$'\e[00;38;5;110m'    # disk sub-labels: steel blue, own zone under Disk:
+C_HOST=$'\e[01;38;5;255m'    # host name: bright white, in the same slate brackets as the disks
+C_TIMES=$'\e[00;38;5;71m'    # the static "x" after the Claudes count: a darker green
 RST=$'\e[00m'
 
 # Per-model color so the family is identifiable at a glance.
@@ -112,30 +115,16 @@ seg="$(model_color "$model")${model}${RST}"
 [ -n "$effort" ] && seg="${seg} ${C_EFFORT}(${effort})${RST}"
 
 # --- Prompt-cache freshness ---
-# The prompt cache is per-session state, so unlike the load metrics it cannot
-# come from the shared collector: each session reads its own transcript. Every
-# API call refreshes the cache, and the response's usage block records which
-# TTL bucket it wrote (5m or 1h), so the last main-loop assistant entry yields
-# both the moment of the last touch and the TTL to count down from. Only the
-# transcript's tail is read; the window just has to be deep enough that one
-# assistant entry survives even when a large tool result sits at the end. If
-# none does, the segment is omitted rather than guessed.
-# Needs `statusLine.refreshInterval` in settings.json — without idle repaints
+# Per-session state, so it comes from the session JSON, not the shared collector.
+# Claude Code's prompt_cache object (v2.1.251+) carries expires_at (epoch seconds,
+# 0 here when the last response cached nothing) and ttl ("5m" or "1h"). Absent
+# until the first API response; the segment is omitted until then.
+# Needs `statusLine.refreshInterval` in settings.json -- without idle repaints
 # a countdown freezes at its last event-driven value.
-if [ "${CC_STATUSLINE_CACHE:-1}" != "0" ] && [ -n "$transcript" ] && [ -r "$transcript" ]; then
-  IFS=$'\t' read -r cache_ts cache_ttl < <(
-    tail -c "${CC_STATUSLINE_CACHE_TAIL_BYTES:-262144}" -- "$transcript" 2>/dev/null | jq -nrR '
-      [ inputs | fromjson?
-        | select(.type == "assistant" and .isSidechain != true)
-        | (.message.usage // empty) as $u
-        | { ts: (.timestamp | sub("\\.[0-9]+"; "") | fromdate? // 0),
-            h1: (($u.cache_creation.ephemeral_1h_input_tokens // 0) > 0) } ]
-      | select(length > 0)
-      # The TTL is a per-session property, but a call that creates nothing new
-      # reports 0 in both buckets -- so scan the whole window, not just `last`.
-      | [ last.ts, (if map(.h1) | any then 3600 else 300 end) ] | @tsv' 2>/dev/null)
-  if [ "${cache_ts:-0}" -gt 0 ] 2>/dev/null; then
-    rem=$(( cache_ts + cache_ttl - EPOCHSECONDS ))
+if [ "${CC_STATUSLINE_CACHE:-1}" != "0" ] && [ -n "$cache_exp" ]; then
+  case "$cache_ttl" in 1h) cache_ttl=3600 ;; *) cache_ttl=300 ;; esac
+  if [ "$cache_exp" -ge 0 ] 2>/dev/null; then
+    rem=$(( cache_exp - EPOCHSECONDS ))
     if [ "$rem" -le 0 ]; then
       # Cold is a resting state, not an alarm -- the next call simply rebuilds
       # the cache -- so it recedes into the idle grey, same as a 0% metric.
@@ -147,10 +136,10 @@ if [ "${CC_STATUSLINE_CACHE:-1}" != "0" ] && [ -n "$transcript" ] && [ -r "$tran
       if [ "$rem" -le $(( cache_ttl / 5 )) ]
         then cache_c=$'\e[01;38;5;208m'; else cache_c=$'\e[01;38;5;78m'; fi
     fi
-    # Same width rule as pair(): pad to the typical value ("47m"), slack in
-    # front of the label. Only "cold" is wider, and that shift happens once.
-    cp=$(( 3 - ${#ctxt} )); [ "$cp" -lt 0 ] && cp=0
-    seg="${seg}${sep}$(printf '%*s' "$cp" "")${C_LABEL}Cache:${RST} ${cache_c}${ctxt}${RST}"
+    # Same width rule as pair(): the field fits the widest value ("cold", 4),
+    # slack between the colon and the value.
+    cp=$(( 4 - ${#ctxt} )); [ "$cp" -lt 0 ] && cp=0
+    seg="${seg}${sep}${C_LABEL}Cache:${RST} $(printf '%*s' "$cp" "")${cache_c}${ctxt}${RST}"
   fi
 fi
 
@@ -158,29 +147,26 @@ fi
 metrics=""
 IFS=$'\t' read -r ok cpu mem cc <<<"${L[1]:-0}"
 if [ "${ok:-0}" = "1" ]; then
-    # pair <label> <text> <value-color> <min-width> [label-color]
-    # Widths are the TYPICAL value's width, not the widest possible one: at
-    # everyday readings nothing pads and the line is tight. Only a wider value
-    # (a disk in double digits) pushes a single char. Any slack goes in FRONT of
-    # the label, never after the colon, so "Label: value" always stays tight.
+    # pair <label> <text> <value-color> <width> [label-color]
+    # Every field is as wide as its widest possible value, so no reading ever
+    # shifts the rest of the line. Slack goes between the colon and the value
+    # ("CPU:  5%"): each label sits right after its separator and the numbers
+    # right-align within their field.
     pair() { p=$(( $4 - ${#2} )); [ "$p" -lt 0 ] && p=0
-             printf '%*s%s%s%s %s%s%s' "$p" "" \
-                    "${5:-$C_LABEL}" "$1" "$RST" "$3" "$2" "$RST"; }
+             printf '%s%s%s %*s%s%s%s' "${5:-$C_LABEL}" "$1" "$RST" \
+                    "$p" "" "$3" "$2" "$RST"; }
     # Every percentage is display-capped at 99% so no field ever needs a 4th
     # char. A pegged metric reads "99%" in red — the color is the alarm, and the
     # last percent doesn't change anything you'd do about it.
-    # CPU keeps a 3-wide field: it dips under 10% often enough that the 9->10
-    # crossing would shift the line on every other repaint. RAM sits in the
-    # double digits permanently, so it gets 2 and in practice never pads.
+    # So every percentage field is 3 wide ("99%"), and the session count 2.
     val()  { c=$(sys_color "$2"); [ "$2" -gt 99 ] && set -- "$1" 99
-             pair "$1" "$2%" "$c" "${4:-3}"; }
-    ram()  { val "$1" "$2" "" 2; }
+             pair "$1" "$2%" "$c" 3; }
     dsk()  { c=$(sys_color "$2"); [ "$2" -gt 99 ] && set -- "$1" 99
-             pair "$1" "$2%" "$c" 2 "$C_DISK"; }
-    cnt()  { pair "$1" "$2"  "$(cc_color  "$2")" 1; }
+             pair "$1" "$2%" "$c" 3 "$C_DISK"; }
+    cnt()  { pair "$1" "$2"  "$(cc_color  "$2")" 2; }
 
-    metrics="$(cnt 'Claudes:' "$cc")${sep}"
-    metrics="${metrics}$(val 'CPU:' "$cpu")${sep}$(ram 'RAM:' "$mem")"
+    metrics="$(cnt 'Claudes:' "$cc")${C_TIMES}x${RST}${sep}"
+    metrics="${metrics}$(val 'CPU:' "$cpu")${sep}$(val 'RAM:' "$mem")"
 
     # Disks are lines 3+ of the jq output. Iterating the array in-shell keeps
     # this fork-free, which matters on a path that runs every repaint.
@@ -197,5 +183,10 @@ if [ "${ok:-0}" = "1" ]; then
     fi
 fi
 
+# Host first, so a line from another machine is obvious at a glance. $HOSTNAME is a
+# bash variable (no fork); the short form drops any domain.
+if [ "${CC_STATUSLINE_HOST:-1}" != "0" ]; then
+  printf "${C_BRK}[${RST} ${C_HOST}%s${RST} ${C_BRK}]${RST}%s" "${HOSTNAME%%.*}" "$sep"
+fi
 printf "${C_CWD}%s${RST}%s%s" "$cwd" "$sep" "$seg"
 [ -n "$metrics" ] && printf "%s%s" "$sep" "$metrics"

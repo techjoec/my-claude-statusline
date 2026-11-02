@@ -20,12 +20,12 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # jq yields a happily-running service and a status line that silently shows
 # nothing -- the most confusing possible failure. Fail here instead.
 missing=""
-for t in jq awk findmnt lsblk nproc systemctl; do
+for t in jq awk findmnt lsblk nproc pgrep systemctl; do
   command -v "$t" >/dev/null 2>&1 || missing="${missing} $t"
 done
 if [ -n "$missing" ]; then
   echo "Missing required tools:$missing" >&2
-  echo "On Debian/Ubuntu: sudo apt install jq util-linux coreutils" >&2
+  echo "Packages: jq, util-linux (findmnt, lsblk), procps (pgrep), coreutils" >&2
   exit 1
 fi
 
